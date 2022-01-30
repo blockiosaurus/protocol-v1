@@ -2,6 +2,7 @@ import { BN } from '@project-serum/anchor';
 
 export * from './mockUSDCFaucet';
 export * from './pythClient';
+export * from './switchboardClient';
 export * from './types';
 export * from './constants/markets';
 export * from './accounts/defaultClearingHouseAccountSubscriber';

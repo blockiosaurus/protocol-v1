@@ -1,254 +1,7 @@
 import * as anchor from '@project-serum/anchor';
-import { Program, Provider } from '@project-serum/anchor';
-import {
-	AccountLayout,
-	MintLayout,
-	Token,
-	TOKEN_PROGRAM_ID,
-} from '@solana/spl-token';
-import {
-	Keypair,
-	PublicKey,
-	sendAndConfirmTransaction,
-	SystemProgram,
-	Transaction,
-	TransactionSignature,
-} from '@solana/web3.js';
-import { assert } from 'chai';
-import buffer from 'buffer';
+
 import BN from 'bn.js';
-import { ClearingHouse, ClearingHouseUser } from '../sdk/src';
-
-export async function mockPythOracle(
-	price: number = 50 * 10e7,
-	expo = -7
-): Promise<PublicKey> {
-	// default: create a $50 coin oracle
-	const program = anchor.workspace.Pyth;
-
-	anchor.setProvider(anchor.Provider.env());
-	const priceFeedAddress = await createPriceFeed({
-		oracleProgram: program,
-		initPrice: price,
-		expo: expo,
-	});
-
-	const feedData = await getFeedData(program, priceFeedAddress);
-	assert.ok(feedData.price === price);
-
-	return priceFeedAddress;
-}
-
-export async function mockSwitchboardOracle(
-	price: number = 50 * 10e7,
-	expo = -7
-): Promise<PublicKey> {
-	// default: create a $50 coin oracle
-	const program = anchor.workspace.Switchboard;
-
-	anchor.setProvider(anchor.Provider.env());
-	const priceFeedAddress = await createPriceFeed({
-		oracleProgram: program,
-		initPrice: price,
-		expo: expo,
-	});
-
-	const feedData = await getFeedData(program, priceFeedAddress);
-	assert.ok(feedData.price === price);
-
-	return priceFeedAddress;
-}
-
-export async function mockUSDCMint(provider: Provider): Promise<Keypair> {
-	const fakeUSDCMint = anchor.web3.Keypair.generate();
-	const createUSDCMintAccountIx = SystemProgram.createAccount({
-		fromPubkey: provider.wallet.publicKey,
-		newAccountPubkey: fakeUSDCMint.publicKey,
-		lamports: await Token.getMinBalanceRentForExemptMint(provider.connection),
-		space: MintLayout.span,
-		programId: TOKEN_PROGRAM_ID,
-	});
-	const initCollateralMintIx = Token.createInitMintInstruction(
-		TOKEN_PROGRAM_ID,
-		fakeUSDCMint.publicKey,
-		6,
-		provider.wallet.publicKey,
-		null
-	);
-
-	const fakeUSDCTx = new Transaction();
-	fakeUSDCTx.add(createUSDCMintAccountIx);
-	fakeUSDCTx.add(initCollateralMintIx);
-
-	await sendAndConfirmTransaction(
-		provider.connection,
-		fakeUSDCTx,
-		// @ts-ignore
-		[provider.wallet.payer, fakeUSDCMint],
-		{
-			skipPreflight: false,
-			commitment: 'recent',
-			preflightCommitment: 'recent',
-		}
-	);
-	return fakeUSDCMint;
-}
-
-export async function mockUserUSDCAccount(
-	fakeUSDCMint: Keypair,
-	usdcMintAmount: BN,
-	provider: Provider,
-	owner?: PublicKey
-): Promise<Keypair> {
-	const userUSDCAccount = anchor.web3.Keypair.generate();
-	const fakeUSDCTx = new Transaction();
-
-	if (owner === undefined) {
-		owner = provider.wallet.publicKey;
-	}
-
-	const createUSDCTokenAccountIx = SystemProgram.createAccount({
-		fromPubkey: provider.wallet.publicKey,
-		newAccountPubkey: userUSDCAccount.publicKey,
-		lamports: await Token.getMinBalanceRentForExemptAccount(
-			provider.connection
-		),
-		space: AccountLayout.span,
-		programId: TOKEN_PROGRAM_ID,
-	});
-	fakeUSDCTx.add(createUSDCTokenAccountIx);
-
-	const initUSDCTokenAccountIx = Token.createInitAccountInstruction(
-		TOKEN_PROGRAM_ID,
-		fakeUSDCMint.publicKey,
-		userUSDCAccount.publicKey,
-		owner
-	);
-	fakeUSDCTx.add(initUSDCTokenAccountIx);
-
-	const mintToUserAccountTx = await Token.createMintToInstruction(
-		TOKEN_PROGRAM_ID,
-		fakeUSDCMint.publicKey,
-		userUSDCAccount.publicKey,
-		provider.wallet.publicKey,
-		[],
-		usdcMintAmount.toNumber()
-	);
-	fakeUSDCTx.add(mintToUserAccountTx);
-
-	const _fakeUSDCTxResult = await sendAndConfirmTransaction(
-		provider.connection,
-		fakeUSDCTx,
-		// @ts-ignore
-		[provider.wallet.payer, userUSDCAccount],
-		{
-			skipPreflight: false,
-			commitment: 'recent',
-			preflightCommitment: 'recent',
-		}
-	);
-	return userUSDCAccount;
-}
-
-export async function mintToInsuranceFund(
-	chInsuranceAccount: Keypair,
-	fakeUSDCMint: Keypair,
-	amount: BN,
-	provider: Provider
-): Promise<TransactionSignature> {
-	const mintToUserAccountTx = await Token.createMintToInstruction(
-		TOKEN_PROGRAM_ID,
-		fakeUSDCMint.publicKey,
-		chInsuranceAccount.publicKey,
-		provider.wallet.publicKey,
-		[],
-		amount.toNumber()
-	);
-
-	const fakeUSDCTx = new Transaction();
-	fakeUSDCTx.add(mintToUserAccountTx);
-
-	return await sendAndConfirmTransaction(
-		provider.connection,
-		fakeUSDCTx,
-		// @ts-ignore
-		[provider.wallet.payer],
-		{
-			skipPreflight: false,
-			commitment: 'recent',
-			preflightCommitment: 'recent',
-		}
-	);
-}
-
-export async function initUserAccounts(
-	NUM_USERS: number,
-	usdcMint: Keypair,
-	usdcAmount: BN,
-	provider: Provider
-) {
-	const user_keys = [];
-	const userUSDCAccounts = [];
-	const clearingHouses = [];
-	const userAccountInfos = [];
-
-	let userAccountPublicKey: PublicKey;
-
-	for (let i = 0; i < NUM_USERS; i++) {
-		console.log('user', i, 'initialize');
-
-		const owner = anchor.web3.Keypair.generate();
-		const ownerWallet = new anchor.Wallet(owner);
-		await provider.connection.requestAirdrop(ownerWallet.publicKey, 100000000);
-
-		const newUserAcct = await mockUserUSDCAccount(
-			usdcMint,
-			usdcAmount,
-			provider,
-			ownerWallet.publicKey
-		);
-
-		const chProgram = anchor.workspace.ClearingHouse as anchor.Program; // this.program-ify
-
-		const clearingHouse1 = ClearingHouse.from(
-			provider.connection,
-			//@ts-ignore
-			ownerWallet,
-			chProgram.programId
-		);
-
-		// await clearingHouse1.initialize(usdcMint.publicKey, false);
-		await clearingHouse1.subscribe();
-
-		userUSDCAccounts.push(newUserAcct);
-		clearingHouses.push(clearingHouse1);
-		// var last_idx = userUSDCAccounts.length - 1;
-
-		// try {
-		[, userAccountPublicKey] =
-			await clearingHouse1.initializeUserAccountAndDepositCollateral(
-				// marketPublicKey,
-				usdcAmount,
-				newUserAcct.publicKey
-			);
-
-		// const userAccount = 0;
-		const userAccount = ClearingHouseUser.from(
-			clearingHouse1,
-			ownerWallet.publicKey
-		);
-		await userAccount.subscribe();
-
-		userAccountInfos.push(userAccount);
-
-		// } catch (e) {
-		// 	assert(true);
-		// }
-
-		user_keys.push(userAccountPublicKey);
-	}
-	return [userUSDCAccounts, user_keys, clearingHouses, userAccountInfos];
-}
+import buffer from 'buffer';
 
 const empty32Buffer = buffer.Buffer.alloc(32);
 const PKorNull = (data) =>
@@ -258,12 +11,7 @@ export const createPriceFeed = async ({
 	initPrice,
 	confidence = undefined,
 	expo = -4,
-}: {
-	oracleProgram: Program;
-	initPrice: number;
-	confidence?: number;
-	expo?: number;
-}): Promise<PublicKey> => {
+}) => {
 	const conf = confidence || new BN((initPrice / 10) * 10 ** -expo);
 	const collateralTokenFeed = new anchor.web3.Account();
 	await oracleProgram.rpc.initialize(
@@ -290,11 +38,7 @@ export const createPriceFeed = async ({
 	return collateralTokenFeed.publicKey;
 };
 
-export const setFeedPrice = async (
-	oracleProgram: Program,
-	newPrice: number,
-	priceFeed: PublicKey
-) => {
+export const setFeedPrice = async (oracleProgram, newPrice, priceFeed) => {
 	const info = await oracleProgram.provider.connection.getAccountInfo(
 		priceFeed
 	);
@@ -303,10 +47,7 @@ export const setFeedPrice = async (
 		accounts: { price: priceFeed },
 	});
 };
-export const getFeedData = async (
-	oracleProgram: Program,
-	priceFeed: PublicKey
-) => {
+export const getFeedData = async (oracleProgram, priceFeed) => {
 	const info = await oracleProgram.provider.connection.getAccountInfo(
 		priceFeed
 	);
